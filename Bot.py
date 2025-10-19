@@ -14,7 +14,7 @@ BINANCE_API_SECRET = os.getenv("BINANCE_API_SECRET", "")
 SYMBOL = os.getenv("SYMBOL", "BTCUSDT")
 INTERVAL = os.getenv("INTERVAL", "1m")
 
-BINANCE_API = "https://api.binance.com/api/v3/klines"
+BINANCE_API BINANCE_API = "https://data-api.binance.vision/api/v3/klines"
 bot = TeleBot(TELEGRAM_TOKEN, parse_mode="HTML")
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(message)s")
