@@ -1,0 +1,9 @@
+# Core dependencies
+pyTelegramBotAPI==4.15.2
+python-dotenv==1.0.0
+requests>=2.31.0
+
+# Optional helpers
+APScheduler==3.10.1
+uvicorn==0.22.0
+gunicorn==20.1.0
