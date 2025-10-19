@@ -1,49 +1,47 @@
 import os
 import time
-import threading
 import logging
-from datetime import datetime, timezone, timedelta
 import requests
 import pandas as pd
+import matplotlib.pyplot as plt
+from datetime import datetime, timezone, timedelta
 from telebot import TeleBot
 
-# --- ENV ---
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "")
-GROUP_ID_ENV = os.getenv("GROUP_ID", "")
+# --- Cấu hình ---
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+GROUP_ID = os.getenv("GROUP_ID")
+BINANCE_API_KEY = os.getenv("BINANCE_API_KEY")
+BINANCE_API_SECRET = os.getenv("BINANCE_API_SECRET")
 SYMBOL = os.getenv("SYMBOL", "BTCUSDT")
 INTERVAL = os.getenv("INTERVAL", "1m")
 
-# Check token
-if not TELEGRAM_TOKEN or not GROUP_ID_ENV:
-    raise SystemExit("❌ Thiếu TELEGRAM_TOKEN hoặc GROUP_ID trong biến môi trường.")
-GROUP_ID = int(GROUP_ID_ENV)
-
-# --- Logging ---
+bot = TeleBot(TELEGRAM_TOKEN)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
-bot = TeleBot(TELEGRAM_TOKEN, parse_mode="HTML")
+BINANCE_URL = "https://api.binance.com/api/v3/klines"
 
-BINANCE_API = "https://api.binance.com/api/v3/klines"
-
-# --- Indicator functions ---
-def fetch_klines(symbol="BTCUSDT", interval="1m", limit=300):
+# --- Lấy dữ liệu Binance ---
+def get_binance_data(symbol=SYMBOL, interval=INTERVAL, limit=200):
     try:
-        r = requests.get(BINANCE_API, params={"symbol": symbol, "interval": interval, "limit": limit}, timeout=10)
-        r.raise_for_status()
-        data = r.json()
+        headers = {"X-MBX-APIKEY": BINANCE_API_KEY}
+        params = {"symbol": symbol, "interval": interval, "limit": limit}
+        response = requests.get(BINANCE_URL, headers=headers, params=params, timeout=10)
+        response.raise_for_status()
+        data = response.json()
+
         df = pd.DataFrame(data, columns=[
             "open_time", "open", "high", "low", "close", "volume",
             "close_time", "quote_asset_volume", "num_trades",
             "taker_buy_base", "taker_buy_quote", "ignore"
         ])
         df["close"] = df["close"].astype(float)
-        df["high"] = df["high"].astype(float)
-        df["low"] = df["low"].astype(float)
+        df["time"] = pd.to_datetime(df["close_time"], unit="ms") + timedelta(hours=7)
         return df
     except Exception as e:
-        logging.error("Lỗi lấy dữ liệu Binance: %s", e)
+        logging.error(f"Lỗi lấy dữ liệu Binance: {e}")
         return pd.DataFrame()
 
+# --- Chỉ báo ---
 def ema(series, period=200):
     return series.ewm(span=period, adjust=False).mean()
 
@@ -56,14 +54,6 @@ def rsi(series, period=14):
     rs = ma_up / (ma_down + 1e-10)
     return 100 - (100 / (1 + rs))
 
-def macd(series, fast=12, slow=26, signal=9):
-    ema_fast = ema(series, fast)
-    ema_slow = ema(series, slow)
-    macd_line = ema_fast - ema_slow
-    signal_line = ema(macd_line, signal)
-    hist = macd_line - signal_line
-    return macd_line, signal_line, hist
-
 def bollinger_bands(series, period=20, std_dev=2):
     mid = series.rolling(window=period).mean()
     std = series.rolling(window=period).std()
@@ -71,99 +61,105 @@ def bollinger_bands(series, period=20, std_dev=2):
     lower = mid - std_dev * std
     return mid, upper, lower
 
-# --- Decision logic ---
+# --- Phân tích xu hướng ---
 def analyze(df):
-    if len(df) < 50:
-        return None
-
     close = df["close"]
     ema200 = ema(close, 200)
     rsi_val = rsi(close, 14)
-    macd_line, signal_line, hist = macd(close)
-    mid, upper, lower = bollinger_bands(close, 20, 2)
+    mid, upper, lower = bollinger_bands(close)
 
-    latest = {
+    last = {
         "price": close.iloc[-1],
         "ema200": ema200.iloc[-1],
         "rsi": rsi_val.iloc[-1],
-        "macd": macd_line.iloc[-1],
-        "macd_signal": signal_line.iloc[-1],
-        "macd_hist": hist.iloc[-1],
+        "bb_mid": mid.iloc[-1],
         "bb_upper": upper.iloc[-1],
         "bb_lower": lower.iloc[-1],
-        "bb_mid": mid.iloc[-1],
     }
 
-    signal = "⚪ Chờ"  # Default
-    strength = "Trung lập"
+    if last["price"] < last["bb_lower"] and last["rsi"] < 35:
+        decision = "🟢 CALL (MUA)"
+        reason = "Giá chạm BB dưới & RSI thấp"
+    elif last["price"] > last["bb_upper"] and last["rsi"] > 65:
+        decision = "🔴 PUT (BÁN)"
+        reason = "Giá chạm BB trên & RSI cao"
+    else:
+        decision = "⚪ CHỜ"
+        reason = "Chưa có tín hiệu rõ ràng"
 
-    # --- Conditions for CALL / PUT ---
-    if (
-        latest["price"] <= latest["bb_lower"]
-        and latest["rsi"] < 35
-        and latest["macd_hist"] > 0
-    ):
-        signal = "🟢 CALL (MUA)"
-        strength = "Tín hiệu mạnh - chạm dải BB dưới & RSI thấp"
-    elif (
-        latest["price"] >= latest["bb_upper"]
-        and latest["rsi"] > 65
-        and latest["macd_hist"] < 0
-    ):
-        signal = "🔴 PUT (BÁN)"
-        strength = "Tín hiệu mạnh - chạm dải BB trên & RSI cao"
+    last["decision"] = decision
+    last["reason"] = reason
+    return last
 
-    # --- Return ---
-    latest["decision"] = signal
-    latest["strength"] = strength
-    return latest
+# --- Vẽ biểu đồ và gửi ảnh ---
+def plot_and_send(df, result):
+    try:
+        close = df["close"]
+        ema200 = ema(close, 200)
+        mid, upper, lower = bollinger_bands(close)
+        rsi_val = rsi(close, 14)
 
-# --- Send Telegram ---
-def send_signal(data):
-    t = datetime.now(timezone.utc) + timedelta(hours=7)
-    text = (
-        f"📊 <b>Bosss Trade AI - BO Signal</b>\n"
-        f"💱 Cặp: BTC/USDT\n"
-        f"💰 Giá hiện tại: {data['price']:.2f}\n"
-        f"📈 RSI: {data['rsi']:.1f} | EMA200: {data['ema200']:.2f}\n"
-        f"📉 MACD hist: {data['macd_hist']:.4f}\n"
-        f"📊 Bollinger:\n"
-        f" ├ Biên trên: {data['bb_upper']:.2f}\n"
-        f" ├ Biên giữa: {data['bb_mid']:.2f}\n"
-        f" └ Biên dưới: {data['bb_lower']:.2f}\n\n"
-        f"➡️ <b>{data['decision']}</b>\n"
-        f"🧠 {data['strength']}\n"
-        f"⏰ {t.strftime('%H:%M:%S %d/%m/%Y')} (UTC+7)"
-    )
-    bot.send_message(GROUP_ID, text)
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(9, 6), gridspec_kw={'height_ratios': [3, 1]})
+        plt.subplots_adjust(hspace=0.25)
+
+        # Biểu đồ giá + EMA + BB
+        ax1.plot(df["time"], close, label="Giá", linewidth=1.5)
+        ax1.plot(df["time"], ema200, label="EMA 200", linestyle="--")
+        ax1.plot(df["time"], upper, color='r', linestyle=':')
+        ax1.plot(df["time"], mid, color='gray', linestyle=':')
+        ax1.plot(df["time"], lower, color='g', linestyle=':')
+        ax1.set_title(f"{SYMBOL} - {INTERVAL} ({result['decision']})", fontsize=11)
+        ax1.legend(loc="upper left")
+
+        # RSI
+        ax2.plot(df["time"], rsi_val, color="orange", label="RSI(14)")
+        ax2.axhline(70, color="red", linestyle="--")
+        ax2.axhline(30, color="green", linestyle="--")
+        ax2.legend(loc="upper left")
+        ax2.set_ylim(0, 100)
+
+        # Lưu hình
+        chart_path = "/tmp/chart.png"
+        plt.savefig(chart_path, bbox_inches="tight")
+        plt.close(fig)
+
+        # Gửi ảnh + text
+        t = datetime.now(timezone.utc) + timedelta(hours=7)
+        msg = (
+            f"📊 <b>Bosss Trade AI - Binance Signal</b>\n"
+            f"💱 Cặp: {SYMBOL}\n"
+            f"💰 Giá hiện tại: {result['price']:.2f}\n"
+            f"📈 RSI: {result['rsi']:.1f} | EMA200: {result['ema200']:.2f}\n"
+            f"📊 Bollinger: {result['bb_lower']:.2f} - {result['bb_upper']:.2f}\n\n"
+            f"➡️ <b>{result['decision']}</b>\n"
+            f"🧠 {result['reason']}\n"
+            f"⏰ {t.strftime('%H:%M:%S %d/%m/%Y')} (UTC+7)"
+        )
+
+        with open(chart_path, "rb") as photo:
+            bot.send_photo(GROUP_ID, photo, caption=msg, parse_mode="HTML")
+
+        logging.info("📤 Đã gửi tín hiệu và biểu đồ thành công.")
+    except Exception as e:
+        logging.error(f"Lỗi khi vẽ/gửi biểu đồ: {e}")
 
 # --- Main loop ---
-def main_loop():
-    logging.info("🚀 Bosss Trade AI (BB+RSI+MACD+EMA) bắt đầu chạy...")
+def main():
+    logging.info("🚀 Bosss Trade AI khởi động (RSI+EMA+BB + Biểu đồ)...")
     last_signal = None
     while True:
-        df = fetch_klines(SYMBOL, INTERVAL)
+        df = get_binance_data()
         if df.empty:
-            time.sleep(30)
-            continue
-
-        info = analyze(df)
-        if not info:
-            logging.info("Dữ liệu chưa đủ để phân tích.")
             time.sleep(60)
             continue
 
-        if info["decision"] != last_signal:
-            send_signal(info)
-            last_signal = info["decision"]
-            logging.info("✅ Gửi tín hiệu: %s", info["decision"])
+        result = analyze(df)
+        if result["decision"] != last_signal:
+            plot_and_send(df, result)
+            last_signal = result["decision"]
         else:
-            logging.info("⏳ Không có tín hiệu mới...")
-
+            logging.info("⏳ Không có tín hiệu mới.")
         time.sleep(60)
 
 if __name__ == "__main__":
-    try:
-        main_loop()
-    except KeyboardInterrupt:
-        logging.info("⛔ Dừng bot thủ công.")
+    main()
