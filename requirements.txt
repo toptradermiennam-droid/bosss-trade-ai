@@ -1,4 +1,4 @@
-requests>=2.31.0
-pandas>=2.0.0
-telebot>=0.0.5
-python-telegram-bot==13.15
+requests
+pandas
+matplotlib
+pyTelegramBotAPI
