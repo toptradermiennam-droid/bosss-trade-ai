@@ -22,8 +22,27 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(message)s")
 # === Fetch dữ liệu từ Binance ===
 def fetch_data():
     try:
-        r = requests.get(BINANCE_API, params={"symbol": SYMBOL, "interval": INTERVAL, "limit": 100})
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+            "Accept": "application/json"
+        }
+        url = f"https://api.binance.com/api/v3/klines?symbol={SYMBOL}&interval={INTERVAL}&limit=100"
+        r = requests.get(url, headers=headers, timeout=10)
         r.raise_for_status()
+        data = r.json()
+
+        df = pd.DataFrame(data, columns=[
+            "time", "open", "high", "low", "close", "volume",
+            "close_time", "quote_asset_volume", "number_of_trades",
+            "taker_buy_base", "taker_buy_quote", "ignore"
+        ])
+
+        df["close"] = df["close"].astype(float)
+        return df
+
+    except Exception as e:
+        logging.error(f"❌ Lỗi lấy dữ liệu Binance: {e}")
+        return None
         data = r.json()
         df = pd.DataFrame(data, columns=[
             "time", "open", "high", "low", "close", "volume",
